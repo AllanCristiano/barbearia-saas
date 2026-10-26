@@ -1,0 +1,108 @@
+# Stack completa: API NestJS + PostgreSQL + Redis + Evolution Go.
+# O Evolution Go fica APENAS na rede interna — barbearias nunca o acessam.
+#
+#   cp .env.example .env   (preencha)
+#   docker compose up -d --build
+#   docker compose --profile tools run --rm seed     (cria o super admin)
+
+name: barbearia-saas
+
+x-restart: &restart
+  restart: unless-stopped
+
+services:
+  postgres:
+    <<: *restart
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./docker/postgres/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks: [internal]
+
+  redis:
+    <<: *restart
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes", "--requirepass", "${REDIS_PASSWORD}"]
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a $${REDIS_PASSWORD} ping | grep PONG"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
+    networks: [internal]
+
+  evolution:
+    <<: *restart
+    image: evoapicloud/evolution-go:latest
+    environment:
+      SERVER_PORT: 8080
+      CLIENT_NAME: barbearia-saas
+      GLOBAL_API_KEY: ${EVOLUTION_GLOBAL_API_KEY}
+      POSTGRES_AUTH_DB: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/evogo_auth?sslmode=disable
+      POSTGRES_USERS_DB: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/evogo_users?sslmode=disable
+      DATABASE_SAVE_MESSAGES: "false"
+      WADEBUG: WARN
+      LOGTYPE: console
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - evolutiondata:/app/data
+    # Exposto só no localhost do servidor (ativação de licença / manager via túnel SSH).
+    ports:
+      - "127.0.0.1:8080:8080"
+    networks: [internal]
+
+  api:
+    <<: *restart
+    build:
+      context: ./backend
+    env_file: .env
+    environment:
+      EVOLUTION_API_URL: http://evolution:8080
+      EVOLUTION_WEBHOOK_BASE: http://api:3000
+      REDIS_HOST: redis
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      evolution:
+        condition: service_started
+    ports:
+      # Porta no seu computador (API_PORT no .env); dentro do Docker é sempre 3000.
+      - "${API_PORT:-3000}:3000"
+    networks: [internal]
+
+  # Utilitário: docker compose --profile tools run --rm seed
+  seed:
+    profiles: [tools]
+    build:
+      context: ./backend
+      target: build
+    env_file: .env
+    command: ["sh", "-c", "npx prisma migrate deploy && npx ts-node prisma/seed.ts"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks: [internal]
+
+volumes:
+  pgdata:
+  redisdata:
+  evolutiondata:
+
+networks:
+  internal:

@@ -1,0 +1,12 @@
+node_modules/
+dist/
+coverage/
+.env
+*.log
+.expo/
+mobile/ios/
+mobile/android/
+*.tsbuildinfo
+
+# Firebase (opcional versionar)
+# mobile/google-services.json

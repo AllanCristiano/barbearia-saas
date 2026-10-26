@@ -1,0 +1,396 @@
+// Modelo de dados multi-tenant. TODA entidade de negócio carrega tenantId
+// e todas as consultas dos services filtram por ele.
+
+generator client {
+  provider      = "prisma-client-js"
+  binaryTargets = ["native", "linux-musl-openssl-3.0.x", "debian-openssl-3.0.x"]
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  SUPER_ADMIN
+  OWNER
+  BARBER
+}
+
+enum TenantStatus {
+  TRIAL
+  ACTIVE
+  PAST_DUE
+  SUSPENDED
+  CANCELED
+}
+
+enum AppointmentStatus {
+  SCHEDULED
+  CONFIRMED
+  IN_PROGRESS
+  COMPLETED
+  CANCELED
+  NO_SHOW
+  RESCHEDULE_PENDING
+}
+
+enum AppointmentSource {
+  WHATSAPP
+  APP
+  ADMIN
+}
+
+enum OfferType {
+  ADVANCE
+  RESCHEDULE
+}
+
+enum OfferStatus {
+  PENDING
+  ACCEPTED
+  DECLINED
+  EXPIRED
+  CANCELED
+}
+
+enum InstanceStatus {
+  CREATED
+  CONNECTING
+  CONNECTED
+  DISCONNECTED
+  ERROR
+}
+
+enum MessageDirection {
+  IN
+  OUT
+}
+
+enum MessageStatus {
+  QUEUED
+  SENT
+  FAILED
+  RECEIVED
+}
+
+enum CampaignStatus {
+  DRAFT
+  SCHEDULED
+  SENDING
+  SENT
+  CANCELED
+}
+
+enum SubscriptionStatus {
+  TRIAL
+  PENDING
+  ACTIVE
+  PAST_DUE
+  CANCELED
+}
+
+enum PaymentMethod {
+  PIX
+  CARD
+  CASH
+  TRANSFER
+}
+
+model Tenant {
+  id                  String       @id @default(uuid())
+  name                String
+  slug                String       @unique
+  phone               String?
+  address             String?
+  timezone            String       @default("America/Sao_Paulo")
+  status              TenantStatus @default(TRIAL)
+  trialEndsAt         DateTime?
+  /// Atendimento automático (menu) no WhatsApp.
+  botEnabled          Boolean      @default(true)
+  /// Saudação personalizada exibida antes do menu.
+  welcomeMessage      String?      @db.Text
+  /// Texto exibido acima das opções do menu (padrão: "Como posso ajudar? ...").
+  menuPrompt          String?      @db.Text
+  /// Opções do menu do bot: [{ key, label, enabled }] na ordem exibida (null = padrão).
+  botMenu             Json?
+  bookingWindowDays   Int          @default(30)
+  minCancelHours      Int          @default(2)
+  reminderHoursBefore Int          @default(3)
+  slotStepMinutes     Int          @default(15)
+  offerTimeoutMinutes Int          @default(15)
+  createdAt           DateTime     @default(now())
+  updatedAt           DateTime     @updatedAt
+
+  users        User[]
+  services     Service[]
+  customers    Customer[]
+  appointments Appointment[]
+  workingHours WorkingHour[]
+  timeOffs     TimeOff[]
+  offers       AppointmentOffer[]
+  instance     WhatsappInstance?
+  messages     MessageLog[]
+  campaigns    Campaign[]
+  conversation Conversation[]
+  subscription Subscription?
+  payments     Payment[]
+}
+
+model User {
+  id           String   @id @default(uuid())
+  tenantId     String?
+  tenant       Tenant?  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  name         String
+  email        String   @unique
+  phone        String?
+  passwordHash String
+  role         Role
+  active       Boolean  @default(true)
+  pushToken    String?
+  refreshHash  String?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  appointments Appointment[]
+  workingHours WorkingHour[]
+  timeOffs     TimeOff[]
+
+  @@index([tenantId, role])
+}
+
+model Service {
+  id              String   @id @default(uuid())
+  tenantId        String
+  tenant          Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  name            String
+  description     String?
+  durationMinutes Int
+  priceCents      Int
+  active          Boolean  @default(true)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  appointments Appointment[]
+
+  @@index([tenantId, active])
+}
+
+/// Janela de atendimento de um barbeiro em um dia da semana (0 = domingo).
+/// Minutos contados a partir de 00:00 no fuso da barbearia. Vários registros
+/// no mesmo dia permitem pausas (ex.: 09:00-12:00 e 13:00-19:00).
+model WorkingHour {
+  id          String @id @default(uuid())
+  tenantId    String
+  tenant      Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  barberId    String
+  barber      User   @relation(fields: [barberId], references: [id], onDelete: Cascade)
+  weekday     Int
+  startMinute Int
+  endMinute   Int
+
+  @@index([tenantId, barberId, weekday])
+}
+
+model TimeOff {
+  id        String   @id @default(uuid())
+  tenantId  String
+  tenant    Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  barberId  String
+  barber    User     @relation(fields: [barberId], references: [id], onDelete: Cascade)
+  startsAt  DateTime
+  endsAt    DateTime
+  reason    String?
+  createdAt DateTime @default(now())
+
+  @@index([tenantId, barberId, startsAt])
+}
+
+model Customer {
+  id             String    @id @default(uuid())
+  tenantId       String
+  tenant         Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  name           String?
+  phone          String
+  email          String?
+  birthDate      DateTime?
+  notes          String?
+  tags           String[]  @default([])
+  marketingOptIn Boolean   @default(true)
+  blocked        Boolean   @default(false)
+  lastVisitAt    DateTime?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  appointments Appointment[]
+  messages     MessageLog[]
+  conversation Conversation?
+
+  @@unique([tenantId, phone])
+  @@index([tenantId, marketingOptIn])
+}
+
+model Appointment {
+  id           String            @id @default(uuid())
+  tenantId     String
+  tenant       Tenant            @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  customerId   String
+  customer     Customer          @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  barberId     String
+  barber       User              @relation(fields: [barberId], references: [id])
+  serviceId    String
+  service      Service           @relation(fields: [serviceId], references: [id])
+  startsAt     DateTime
+  endsAt       DateTime
+  status       AppointmentStatus @default(SCHEDULED)
+  source       AppointmentSource @default(WHATSAPP)
+  priceCents   Int
+  notes        String?
+  cancelReason String?
+  canceledAt   DateTime?
+  reminderAt   DateTime?
+  createdAt    DateTime          @default(now())
+  updatedAt    DateTime          @updatedAt
+
+  offers AppointmentOffer[]
+
+  @@index([tenantId, barberId, startsAt])
+  @@index([tenantId, customerId])
+  @@index([status, startsAt])
+}
+
+/// Proposta enviada ao cliente pelo WhatsApp:
+/// - ADVANCE: um horário vagou antes do dele, quer adiantar?
+/// - RESCHEDULE: o barbeiro não poderá atender, escolha um novo horário.
+model AppointmentOffer {
+  id            String      @id @default(uuid())
+  tenantId      String
+  tenant        Tenant      @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  appointmentId String
+  appointment   Appointment @relation(fields: [appointmentId], references: [id], onDelete: Cascade)
+  type          OfferType
+  status        OfferStatus @default(PENDING)
+  /// [{ startsAt: ISO, barberId: string }]
+  options       Json
+  expiresAt     DateTime
+  respondedAt   DateTime?
+  createdAt     DateTime    @default(now())
+
+  @@index([tenantId, status])
+  @@index([status, expiresAt])
+}
+
+model WhatsappInstance {
+  id             String         @id @default(uuid())
+  tenantId       String         @unique
+  tenant         Tenant         @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  /// Nome/ID da instância no Evolution Go (nunca exposto ao cliente).
+  instanceName   String         @unique
+  externalId     String?
+  /// Token da instância, criptografado (AES-256-GCM).
+  tokenEncrypted String
+  /// Segredo que autentica os webhooks recebidos desta instância.
+  webhookSecret  String
+  status         InstanceStatus @default(CREATED)
+  phoneNumber    String?
+  lastError      String?
+  failedChecks   Int            @default(0)
+  lastCheckedAt  DateTime?
+  connectedAt    DateTime?
+  createdAt      DateTime       @default(now())
+  updatedAt      DateTime       @updatedAt
+}
+
+model MessageLog {
+  id         String           @id @default(uuid())
+  tenantId   String
+  tenant     Tenant           @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  customerId String?
+  customer   Customer?        @relation(fields: [customerId], references: [id], onDelete: SetNull)
+  campaignId String?
+  campaign   Campaign?        @relation(fields: [campaignId], references: [id], onDelete: SetNull)
+  direction  MessageDirection
+  status     MessageStatus
+  phone      String
+  body       String           @db.Text
+  externalId String?
+  error      String?
+  createdAt  DateTime         @default(now())
+
+  @@index([tenantId, createdAt])
+  @@index([tenantId, externalId])
+}
+
+model Conversation {
+  id            String   @id @default(uuid())
+  tenantId      String
+  tenant        Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  customerId    String   @unique
+  customer      Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  /// Estado do menu do bot: { step, data, at } (ver bot/menu-bot.service.ts).
+  state         Json     @default("{}")
+  /// Quando true a IA não responde (atendimento humano assumiu).
+  humanTakeover Boolean  @default(false)
+  updatedAt     DateTime @updatedAt
+}
+
+model Campaign {
+  id              String         @id @default(uuid())
+  tenantId        String
+  tenant          Tenant         @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  title           String
+  message         String         @db.Text
+  /// Filtra por tags; vazio = todos os clientes com opt-in.
+  tags            String[]       @default([])
+  status          CampaignStatus @default(DRAFT)
+  scheduledAt     DateTime?
+  startedAt       DateTime?
+  finishedAt      DateTime?
+  totalRecipients Int            @default(0)
+  sentCount       Int            @default(0)
+  failedCount     Int            @default(0)
+  createdAt       DateTime       @default(now())
+  updatedAt       DateTime       @updatedAt
+
+  messages MessageLog[]
+
+  @@index([status, scheduledAt])
+}
+
+model Subscription {
+  id               String             @id @default(uuid())
+  tenantId         String             @unique
+  tenant           Tenant             @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  status           SubscriptionStatus @default(TRIAL)
+  amountCents      Int                @default(20000)
+  currentPeriodEnd DateTime?
+  canceledAt       DateTime?
+  createdAt        DateTime           @default(now())
+  updatedAt        DateTime           @updatedAt
+
+  payments Payment[]
+}
+
+/// Pagamento da mensalidade registrado manualmente pelo SUPER_ADMIN.
+model Payment {
+  id             String        @id @default(uuid())
+  tenantId       String
+  tenant         Tenant        @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  subscriptionId String
+  subscription   Subscription  @relation(fields: [subscriptionId], references: [id], onDelete: Cascade)
+  method         PaymentMethod
+  amountCents    Int
+  months         Int           @default(1)
+  notes          String?
+  paidAt         DateTime      @default(now())
+  createdAt      DateTime      @default(now())
+
+  @@index([tenantId, paidAt])
+}
+
+/// Idempotência de eventos externos reenviados.
+model ProcessedEvent {
+  id        String   @id
+  source    String
+  createdAt DateTime @default(now())
+}
